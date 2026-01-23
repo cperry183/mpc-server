@@ -23,4 +23,22 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+  job-leads:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workers.job_leads"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - POLL_SECONDS=21600
+      - SEEN_TTL_SECONDS=1209600
+      - RSS_URLS=PUT_FEED_URLS_HERE_COMMA_SEPARATED
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=your_gmail@gmail.com
+      - SMTP_PASS=YOUR_APP_PASSWORD
+      - MAIL_FROM=your_gmail@gmail.com
+      - MAIL_TO=your_gmail@gmail.com
+    depends_on:
+      - redis
 

@@ -184,7 +184,7 @@ def join_session(session_id: str, req: JoinRequest):
 def send_message(
     session_id: str,
     req: SendMessageRequest,
-    authorization: str = "",
+    authorization: str = Header(""),
 ):
     claims = auth_token(authorization)
     if claims.get("typ") != "party" or claims.get("session_id") != session_id:
@@ -215,7 +215,7 @@ def poll(
     session_id: str,
     channel: str = "default",
     last_id: str = "0-0",
-    authorization: str = "",
+    authorization: str = Header(""),
 ):
     claims = auth_token(authorization)
     if claims.get("typ") != "party" or claims.get("session_id") != session_id:

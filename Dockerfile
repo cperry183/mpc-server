@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY workers ./workers
 COPY scripts ./scripts
 
 RUN chmod +x /srv/scripts/entrypoint.sh
