@@ -1,13 +1,14 @@
+import json
 import os
 import time
 import uuid
 
-from typing import Optional, Dict, Any, List
-from fastapi import Header
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
-from jose import jwt, JWTError
+from typing import Any, Dict, List, Optional
+
 import redis
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from jose import JWTError, jwt
+from pydantic import BaseModel, Field
 
 APP_NAME = "mpc-coordinator"
 
@@ -18,18 +19,22 @@ JWT_ALG = "HS256"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
 MAX_PAYLOAD_BYTES = int(os.getenv("MAX_PAYLOAD_BYTES", "65536"))
 XREAD_BLOCK_MS = int(os.getenv("XREAD_BLOCK_MS", "20000"))
+STREAM_MAXLEN = int(os.getenv("STREAM_MAXLEN", "5000"))
 
 r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 app = FastAPI(title=APP_NAME)
 
+
 # -------------------------
 # Models
 # -------------------------
 
+
 class CreateSessionRequest(BaseModel):
     parties: int = Field(ge=2, le=100)
     meta: Optional[dict] = None
+
 
 class CreateSessionResponse(BaseModel):
     session_id: str
@@ -37,8 +42,10 @@ class CreateSessionResponse(BaseModel):
     created_at: int
     admin_token: str
 
+
 class JoinRequest(BaseModel):
     party_id: str = Field(min_length=1, max_length=64)
+
 
 class JoinResponse(BaseModel):
     session_id: str
@@ -46,10 +53,12 @@ class JoinResponse(BaseModel):
     party_token: str
     expected_parties: int
 
+
 class SendMessageRequest(BaseModel):
     channel: str = Field(default="default", min_length=1, max_length=64)
     payload: dict
     to_party: Optional[str] = None
+
 
 class PollResponse(BaseModel):
     session_id: str
@@ -57,29 +66,36 @@ class PollResponse(BaseModel):
     last_id: str
     messages: List[dict]
 
+
 # -------------------------
 # Helpers
 # -------------------------
 
+
 def now() -> int:
     return int(time.time())
+
 
 def session_key(session_id: str) -> str:
     return f"session:{session_id}"
 
+
 def joined_key(session_id: str) -> str:
     return f"session:{session_id}:joined"
+
 
 def stream_key(session_id: str, channel: str) -> str:
     return f"session:{session_id}:chan:{channel}"
 
+
 def ensure_session_exists(session_id: str) -> Dict[str, Any]:
-    s = r.hgetall(session_key(session_id))
-    if not s:
+    session = r.hgetall(session_key(session_id))
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     r.expire(session_key(session_id), SESSION_TTL_SECONDS)
     r.expire(joined_key(session_id), SESSION_TTL_SECONDS)
-    return s
+    return session
+
 
 def sign_token(claims: Dict[str, Any], exp_seconds: int) -> str:
     payload = dict(claims)
@@ -87,37 +103,68 @@ def sign_token(claims: Dict[str, Any], exp_seconds: int) -> str:
     payload["exp"] = now() + exp_seconds
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
+
 def verify_token(token: str) -> Dict[str, Any]:
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
 
 def auth_token(auth_header: str) -> Dict[str, Any]:
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Missing authorization token")
     token = auth_header.strip()
     if token.lower().startswith("bearer "):
         token = token.split(" ", 1)[1]
     return verify_token(token)
 
+
+def encode_payload(payload: dict) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    return encoded
+
+
+def decode_payload(raw_payload: str) -> Dict[str, Any]:
+    try:
+        return json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return {"raw": raw_payload}
+
+
+def build_message(mid: str, fields: Dict[str, Any], party_id: str) -> Optional[Dict[str, Any]]:
+    to_party = fields.get("to")
+    if to_party and to_party != party_id:
+        return None
+    payload = decode_payload(fields.get("payload", "{}"))
+    return {"id": mid, **fields, "payload": payload}
+
+
 # -------------------------
 # Health
 # -------------------------
 
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
+
 
 @app.get("/readyz")
 def readyz():
     try:
         r.ping()
         return {"ok": True, "redis": True}
-    except Exception:
-        raise HTTPException(status_code=503, detail="Redis unavailable")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Redis unavailable") from exc
+
 
 # -------------------------
 # Sessions
 # -------------------------
+
 
 @app.post("/sessions", response_model=CreateSessionResponse)
 def create_session(req: CreateSessionRequest):
@@ -130,6 +177,7 @@ def create_session(req: CreateSessionRequest):
             "created_at": created,
             "parties": req.parties,
             "locked": 0,
+            "meta": json.dumps(req.meta or {}),
         },
     )
     r.expire(session_key(sid), SESSION_TTL_SECONDS)
@@ -147,14 +195,17 @@ def create_session(req: CreateSessionRequest):
         admin_token=admin_token,
     )
 
+
 @app.post("/sessions/{session_id}/join", response_model=JoinResponse)
 def join_session(session_id: str, req: JoinRequest):
-    s = ensure_session_exists(session_id)
+    session = ensure_session_exists(session_id)
 
-    if s.get("locked") == "1":
+    if session.get("locked") == "1":
         raise HTTPException(status_code=409, detail="Session locked")
 
-    r.sadd(joined_key(session_id), req.party_id)
+    added = r.sadd(joined_key(session_id), req.party_id)
+    if added == 0:
+        raise HTTPException(status_code=409, detail="Party already joined")
 
     party_token = sign_token(
         {
@@ -166,19 +217,21 @@ def join_session(session_id: str, req: JoinRequest):
     )
 
     joined = r.scard(joined_key(session_id))
-    if joined >= int(s["parties"]):
+    if joined >= int(session["parties"]):
         r.hset(session_key(session_id), "locked", 1)
 
     return JoinResponse(
         session_id=session_id,
         party_id=req.party_id,
         party_token=party_token,
-        expected_parties=int(s["parties"]),
+        expected_parties=int(session["parties"]),
     )
+
 
 # -------------------------
 # Messaging
 # -------------------------
+
 
 @app.post("/sessions/{session_id}/send")
 def send_message(
@@ -201,14 +254,16 @@ def send_message(
         {
             "ts": now(),
             "from": claims["party_id"],
-            "payload": str(req.payload),
+            "to": req.to_party or "",
+            "payload": encode_payload(req.payload),
         },
-        maxlen=5000,
+        maxlen=STREAM_MAXLEN,
         approximate=True,
     )
     r.expire(key, SESSION_TTL_SECONDS)
 
     return {"ok": True, "message_id": msg_id}
+
 
 @app.get("/sessions/{session_id}/poll", response_model=PollResponse)
 def poll(
@@ -224,16 +279,18 @@ def poll(
     ensure_session_exists(session_id)
 
     key = stream_key(session_id, channel)
-    records = r.xread({key: last_id}, count=100, block=1)
+    records = r.xread({key: last_id}, count=100, block=XREAD_BLOCK_MS)
 
-    messages = []
+    messages: List[dict] = []
     new_last = last_id
 
     if records:
         _, entries = records[0]
         for mid, fields in entries:
             new_last = mid
-            messages.append({"id": mid, **fields})
+            message = build_message(mid, fields, claims["party_id"])
+            if message:
+                messages.append(message)
 
     return PollResponse(
         session_id=session_id,
@@ -242,9 +299,11 @@ def poll(
         messages=messages,
     )
 
+
 # -------------------------
-# WebSocket (FIXED)
+# WebSocket
 # -------------------------
+
 
 @app.websocket("/ws/sessions/{session_id}")
 async def ws_session(websocket: WebSocket, session_id: str):
@@ -274,12 +333,11 @@ async def ws_session(websocket: WebSocket, session_id: str):
             _, records = entries[0]
             for mid, fields in records:
                 last_id = mid
-                await websocket.send_json(
-                    {"type": "message", "id": mid, **fields}
-                )
+                message = build_message(mid, fields, claims["party_id"])
+                if message:
+                    await websocket.send_json({"type": "message", **message})
 
     except WebSocketDisconnect:
         pass
     except Exception:
         await websocket.close(code=1011)
-
