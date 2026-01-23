@@ -1,0 +1,10 @@
+mpc-server/
+  app/
+    main.py
+  scripts/
+    entrypoint.sh
+  requirements.txt
+  Dockerfile
+  docker-compose.yml
+  .dockerignore
+
