@@ -19,15 +19,22 @@ services:
     depends_on:
       - redis
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz').read()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz').read()",
+        ]
       interval: 10s
       timeout: 3s
       retries: 10
+
   job-leads:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "-m", "workers.job_leads"]
+    command: ["python", "rss_job_watcher.py"]
     environment:
       - REDIS_URL=redis://redis:6379/0
       - POLL_SECONDS=21600
@@ -37,24 +44,25 @@ services:
       - SMTP_PORT=587
       - SMTP_USER=your_gmail@gmail.com
       - SMTP_PASS=YOUR_APP_PASSWORD
-      - MAIL_FROM=cbp169@gmail.com
-      - MAIL_TO=cbp169@gmail.com
-    dice-leads:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["python", "-m", "workers.dice_email_leads"]
-    environment:
-      - IMAP_HOST=imap.gmail.com
-      - IMAP_USER=cbp169@gmail.com
-      - IMAP_PASS=your_google_app_password
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USER=cbp169@gmail.com
-      - SMTP_PASS=your_google_app_password
-      - MAIL_TO=cbp169@gmail.com
-      - REDIS_URL=redis://redis:6379/0
+      - MAIL_FROM=your_gmail@gmail.com
+      - MAIL_TO=your_gmail@gmail.com
     depends_on:
       - redis
 
-
+  dice-leads:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "dice_job_watcher.py"]
+    environment:
+      - IMAP_HOST=imap.gmail.com
+      - IMAP_USER=your_gmail@gmail.com
+      - IMAP_PASS=your_google_app_password
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=your_gmail@gmail.com
+      - SMTP_PASS=your_google_app_password
+      - MAIL_TO=your_gmail@gmail.com
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
